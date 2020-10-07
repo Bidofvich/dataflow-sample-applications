@@ -24,9 +24,10 @@ import tensorflow as tf
 
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions
+from google.protobuf.json_format import Parse
 from tfx_bsl.public.beam import RunInference
 from tfx_bsl.public.proto import model_spec_pb2
-from timeseries.transforms import process_inference_return
+from timeseries.encoder_decoder import encoder_decoder_preprocessing
 
 
 def run(args, pipeline_args):
@@ -34,38 +35,36 @@ def run(args, pipeline_args):
     Run inference pipeline using data generated from streaming pipeline.
     """
     pipeline_options = PipelineOptions(
-            pipeline_args, save_main_session=True, streaming=False)
+            pipeline_args, save_main_session=True, streaming=True)
 
     with beam.Pipeline(options=pipeline_options) as pipeline:
         _ = (
                 pipeline
-                | 'ReadTFExample' >> beam.io.tfrecordio.ReadFromTFRecord(
-                        file_pattern=args.tfrecord_folder)
-                | 'ParseExamples' >> beam.Map(tf.train.Example.FromString)
+                | 'ReadTFExample' >> beam.io.gcp.pubsub.ReadStringsFromPubSub(subscription=args.pubsub_subscription)
+                | 'ParseExamples' >> beam.Map(lambda x: Parse(x, tf.train.Example()))
                 | RunInference(
                         model_spec_pb2.InferenceSpecType(
                                 saved_model_spec=model_spec_pb2.SavedModelSpec(
                                         signature_name=['serving_default'],
                                         model_path=args.saved_model_location)))
-                | beam.ParDo(process_inference_return.ProcessReturn())
-                | beam.ParDo(process_inference_return.CheckAnomalous())
+                | beam.ParDo(encoder_decoder_preprocessing.ProcessReturn())
+                | beam.ParDo(encoder_decoder_preprocessing.CheckAnomalous())
                 | beam.ParDo(print))
-
 
 if __name__ == '__main__':
     logging.getLogger().setLevel(logging.INFO)
     import argparse
 
-    sys.argv.append("--saved_model_location=/tmp/serving_model_dir/")
-    sys.argv.append("--tfrecord_folder=/tmp/Timeseries_TFExamples_*")
+    # sys.argv.append("--saved_model_location=/tmp/serving_model_dir/")
+    # sys.argv.append("--pubsub_subscription=projects/<your-project>/subscriptions/outlier-detection")
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-            '--tfrecord_folder',
-            dest='tfrecord_folder',
+            '--pubsub_subscription',
+            dest='pubsub_subscription',
             required=True,
             help=
-            'Location of the TFRecord files produced by the streaming pipeline')
+            'PubSub Subscription of the JSON samples produced by the streaming pipeline')
     parser.add_argument(
             '--saved_model_location',
             dest='saved_model_location',

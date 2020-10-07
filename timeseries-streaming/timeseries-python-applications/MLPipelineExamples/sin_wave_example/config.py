@@ -35,3 +35,11 @@ SYNTHETIC_DATASET = {
     'local-bootstrap': f'{DATA_ROOT}/simple-data-5-step/tfx-data/data/',
     'local-raw': f'{DATA_ROOT}/simple-data-5-step/tfx-data/data/'
 }
+
+MODEL_CONFIG = {
+    'timesteps': 5,
+    'features': ['timeseries_x-value-LAST', 'timeseries_x-value-FIRST', 'timeseries_x-value-FIRST_TIMESTAMP'],
+    'enable_timestamp_features': True,
+    'time_features': ['MINUTE', 'HOUR'],
+    'tf_transform_output': f'/{PIPELINE_ROOT}/Transform/transform_graph/'
+}

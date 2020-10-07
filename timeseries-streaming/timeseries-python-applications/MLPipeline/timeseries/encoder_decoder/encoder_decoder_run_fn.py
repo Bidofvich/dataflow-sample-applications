@@ -19,8 +19,9 @@ import timeseries.encoder_decoder.encoder_decoder_model as encoder_decoder_model
 
 from typing import Text
 from tfx.components.trainer.executor import TrainerFnArgs
+
 """
-RunFn for auto encoder decoder sample.
+RunFn for auto encoder decoder.
 """
 
 
@@ -29,24 +30,29 @@ def _input_fn(
         tf_transform_output: tft.TFTransformOutput,
         batch_size: int = 2) -> tf.data.Dataset:
     transformed_feature_spec = (
-            tf_transform_output.transformed_feature_spec().copy())
+        tf_transform_output.transformed_feature_spec().copy())
 
     dataset = tf.data.experimental.make_batched_features_dataset(
-            file_pattern=file_pattern,
-            batch_size=batch_size,
-            # TODO Document. Shuffle must be set to False.
-            shuffle=False,
-            features=transformed_feature_spec,
-            reader=_gzip_reader_fn)
+        file_pattern=file_pattern,
+        batch_size=batch_size,
+        # Shuffle must be False, as Zip operation is not transitive
+        shuffle=False,
+        features=transformed_feature_spec,
+        reader=_gzip_reader_fn)
 
-    dataset = dataset.map(create_training_data)
-    dataset = tf.data.Dataset.zip((dataset, dataset))
+    train_dataset = dataset.map(create_training_data)
+    label_dataset = dataset.map(create_label_data)
+    dataset = tf.data.Dataset.zip((train_dataset, label_dataset))
 
     return dataset
 
 
 def create_training_data(features):
     return features['Float32']
+
+
+def create_label_data(features):
+    return features['LABEL']
 
 
 def _gzip_reader_fn(filenames):
@@ -64,9 +70,9 @@ def _get_serve_tf_examples_fn(model, tf_transform_output):
         """Returns the output to be used in the serving signature."""
         feature_spec = tf_transform_output.raw_feature_spec()
         parsed_features = tf.io.parse_example(
-                serialized_tf_examples, feature_spec)
+            serialized_tf_examples, feature_spec)
         transformed_features = create_training_data(
-                model.tft_layer(parsed_features))
+            model.tft_layer(parsed_features))
         return model(transformed_features)
 
     return serve_tf_examples_fn
@@ -82,39 +88,38 @@ def run_fn(fn_args: TrainerFnArgs):
     print(f"Parameters {fn_args}")
 
     train_dataset = _input_fn(
-            fn_args.train_files,
-            tf_transform_output,
-            batch_size=fn_args.train_batches)
+        fn_args.train_files,
+        tf_transform_output,
+        batch_size=fn_args.train_batches)
 
     eval_dataset = _input_fn(
-            fn_args.eval_files,
-            tf_transform_output,
-            batch_size=fn_args.eval_batches)
+        fn_args.eval_files,
+        tf_transform_output,
+        batch_size=fn_args.eval_batches)
 
     # mirrored_strategy = tf.distribute.MirroredStrategy()
     # with mirrored_strategy.scope():
-    model = encoder_decoder_model._build_keras_model(
-            tf_transform_output=tf_transform_output,
-            timesteps=fn_args.timesteps,
-            number_features=fn_args.number_features,
-            outer_units=fn_args.outer_units,
-            inner_units=fn_args.inner_units)
+    model = encoder_decoder_model.build_keras_model(
+        timesteps=fn_args.timesteps,
+        number_features=fn_args.number_features,
+        outer_units=fn_args.outer_units,
+        inner_units=fn_args.inner_units)
 
     model.fit(
-            train_dataset,
-            epochs=fn_args.epochs,
-            steps_per_epoch=fn_args.train_steps,
-            validation_data=eval_dataset,
-            validation_steps=fn_args.eval_steps)
+        train_dataset,
+        epochs=fn_args.epochs,
+        steps_per_epoch=fn_args.train_steps,
+        validation_data=eval_dataset,
+        validation_steps=fn_args.eval_steps)
 
     signatures = {
-            'serving_default': _get_serve_tf_examples_fn(
-                    model, tf_transform_output).get_concrete_function(
-                            tf.TensorSpec(
-                                    shape=(None),
-                                    dtype=tf.string,
-                                    name='examples')),
+        'serving_default': _get_serve_tf_examples_fn(
+            model, tf_transform_output).get_concrete_function(
+            tf.TensorSpec(
+                shape=None,
+                dtype=tf.string,
+                name='examples')),
     }
 
     model.save(
-            fn_args.serving_model_dir, save_format='tf', signatures=signatures)
+        fn_args.serving_model_dir, save_format='tf', signatures=signatures)

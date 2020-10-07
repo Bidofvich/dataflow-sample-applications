@@ -12,16 +12,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-import setuptools
-
-setuptools.setup(
-    name='timeseries-sample',
-    version='0.3.1-sample',
-    install_requires=[
-      'tfx==0.23.0',
-      'kfp==0.5.1'
-    ],
-    python_requires='>=3.7',
-    packages=setuptools.find_namespace_packages()
-)

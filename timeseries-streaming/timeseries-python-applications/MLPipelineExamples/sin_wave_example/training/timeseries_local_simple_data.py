@@ -22,7 +22,7 @@ from tfx.proto import trainer_pb2
 import timeseries.pipeline_templates.timeseries_pipeline as pipeline
 from tfx.orchestration import metadata
 
-import config
+import MLPipelineExamples.sin_wave_example.config as config
 
 PIPELINE_NAME = 'synthetic_data_pipeline'
 
@@ -43,8 +43,9 @@ tfx_pipeline = pipeline.create_pipeline(
     trainer_custom_config={'epochs': 30,
                            'train_batches': 1000,
                            'eval_batches': 1000,
-                           'timesteps': 5,
-                           'number_features': 2,
+                           'timesteps': config.MODEL_CONFIG['timesteps'],
+                           'number_features': 6,
                            'outer_units': 16,
-                           'inner_units': 4})
+                           'inner_units': 4},
+    transformer_custom_config=config.MODEL_CONFIG,)
 BeamDagRunner().run(tfx_pipeline)

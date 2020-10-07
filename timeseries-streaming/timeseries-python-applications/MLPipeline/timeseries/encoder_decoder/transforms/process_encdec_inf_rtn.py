@@ -23,6 +23,8 @@ import tensorflow as tf
 
 import apache_beam as beam
 from tensorflow_serving.apis import prediction_log_pb2
+import tensorflow_transform as tft
+from timeseries.utils import timeseries_transform_utils
 
 
 class ProcessReturn(beam.DoFn):
@@ -33,8 +35,15 @@ class ProcessReturn(beam.DoFn):
     """
 
     # TODO(BEAM-6158): Revert the workaround once we can pickle super() on py3.
-    def __init__(self, *unused_args, **unused_kwargs):
+    def __init__(self, config: Dict[Text, Any]):
         beam.DoFn.__init__(self)
+        self.tf_transform_output = config['tf_transform_output']
+        self.config = config
+
+    def setup(self):
+        self.transform_output = tft.TFTransformOutput(self.tf_transform_output)
+        self.tft_layer = self.transform_output.transform_features_layer()
+
 
     def process(
             self,
@@ -44,37 +53,34 @@ class ProcessReturn(beam.DoFn):
         request_input = element.predict_log.request.inputs['examples']
         request_output = element.predict_log.response.outputs['output_0']
 
-        # Create the list of features based on the TF.Example used as input
-        example = tf.train.Example.FromString(request_input.string_val[0])
-        feature_labels = []
-        features = example.features.feature
-
+        # TODO check conditions where this is true
         if len(request_input.string_val) > 1:
             raise Exception("Only support single input string.")
 
-        span_start_timestamp = datetime.fromtimestamp(
-                features['METADATA_SPAN_START_TS'].int64_list.value[0] / 1000)
-        span_end_timestamp = datetime.fromtimestamp(
-                features['METADATA_SPAN_END_TS'].int64_list.value[0] / 1000)
+        example = tf.io.parse_single_example(request_input.string_val[0], self.transform_output.raw_feature_spec())
+        batched_example = {k: tf.sparse.expand_dims(v, 0) for k, v in example.items()}
 
-        for f in features:
-            # Remove metadata which is not used by the model
-            if not (f.startswith("METADATA_") or f.startswith("__CONFIG_")):
-                # Current model only uses the Float32 values
-                if len(features[f].float_list.value) > 0:
-                    if f.endswith("-FIRST") or f.endswith("-LAST"):
-                        feature_labels.append(f)
-        # Sort the values by lexical order
-        feature_labels.sort()
-        # Connect the result to the input and output as tuple
+        inputs = self.tft_layer(batched_example)
+        # Batch size is always 1, we only need the first value.
+        original_data = inputs['LABEL'].numpy()[0]
+
         results = tf.io.parse_tensor(
-                request_output.SerializeToString(), tf.float32).numpy()
+            request_output.SerializeToString(), tf.float32).numpy()
+
+        span_start_timestamp = datetime.fromtimestamp(
+            tf.sparse.to_dense(example['METADATA_SPAN_START_TS']).numpy()[0] / 1000)
+        span_end_timestamp = datetime.fromtimestamp(
+            tf.sparse.to_dense(example['METADATA_SPAN_END_TS']).numpy()[0] / 1000)
 
         result = {
-                'span_start_timestamp': span_start_timestamp,
-                'span_end_timestamp': span_end_timestamp
+            'span_start_timestamp': span_start_timestamp,
+            'span_end_timestamp': span_end_timestamp
         }
+
         timestep_counter = 0
+        feature_labels = timeseries_transform_utils.create_feature_list_from_list(features=example.keys(),
+                                                                                  config=self.config)
+
         for batches in results:
             for timestep in batches:
                 feature_pos = 0
@@ -82,21 +88,22 @@ class ProcessReturn(beam.DoFn):
                     # Find which label this item matches.
                     label = (feature_labels[feature_pos])
                     # Find the input value from the float list for this sample
-                    input_value = features[label].float_list.value[
-                            timestep_counter]
+                    input_value = original_data[timestep_counter][feature_pos]
                     result[label] = {
-                            'input_value': input_value,
-                            'output_value': value,
-                            # Outliers will effect the head of their array, so we need to keep the array to show in
-                            # the outlier detection.
-                            'raw_data_array': str(
-                                    features[label].float_list.value),
-                            'timestep': timestep_counter
+                        'input_value': input_value,
+                        'output_value': value,
+                        'timestep': timestep_counter
                     }
+                    if not str(label).endswith('-TIMESTAMP'):
+                        result[label].update({
+                            # Outliers will effect the head of their array, so we need to keep the array
+                            # to show in the outlier detection.
+                            'raw_data_array': str(tf.sparse.to_dense(example[label]).numpy())})
                     feature_pos += 1
                 # Only yield last value
                 timestep_counter += 1
-        # Output the last value only, which is the last in the pos list
+        # # Output the last value only, which is the last in the pos list
+        print(result)
         yield result
 
 
@@ -106,7 +113,7 @@ class CheckAnomalous(beam.DoFn):
     """
 
     # TODO(BEAM-6158): Revert the workaround once we can pickle super() on py3.
-    def __init__(self, threshold: int = 5, *unused_args, **unused_kwargs):
+    def __init__(self, threshold: float = 0.00, *unused_args, **unused_kwargs):
         beam.DoFn.__init__(self)
         self.threshold = threshold
 
